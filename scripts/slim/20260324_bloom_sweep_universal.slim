@@ -1,0 +1,553 @@
+// =============================================================================
+// DOLIOLID BLOOM FOUNDER THRESHOLD — UNIVERSAL PARAMETERIZED
+// =============================================================================
+//
+// STRATEGY:
+// Run the doliolid life cycle model to mutation-drift equilibrium, then
+// continue running past equilibrium, harvesting nurse haplotypes every
+// COLLECT_INTERVAL ticks into a pooled haplotype bank. After N_COLLECTS
+// harvests, sweep over k values (bloom founder counts), drawing from the
+// bank, clonally expanding, sampling, and computing summary statistics.
+//
+// All life cycle parameters (K_NURSES, OOZ_SURVIVAL, NURSE_MORT) and
+// the mutation rate (MU) are passed via -d command-line flags so that
+// one script serves all 18 parameter combinations.
+//
+// Usage:
+//   slim -d K_NURSES=5000 -d MU=2.47e-7 -d OOZ_SURVIVAL=0.50 \
+//        -d NURSE_MORT=0.05 -d COMBO_ID=4 \
+//        -d "OUTFILE='/path/to/results.tsv'" \
+//        -d "LOGFILE='/path/to/log.csv'" \
+//        20260324_bloom_sweep_universal.slim
+//
+// Emily Gipson, UGA mfflab
+// Created: 2026-03-24
+// =============================================================================
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+
+	// --- Required parameters ---
+	if (!exists("K_NURSES"))
+		stop("K_NURSES must be defined via -d flag");
+	if (!exists("MU"))
+		stop("MU must be defined via -d flag");
+	if (!exists("OOZ_SURVIVAL"))
+		stop("OOZ_SURVIVAL must be defined via -d flag");
+	if (!exists("NURSE_MORT"))
+		stop("NURSE_MORT must be defined via -d flag");
+	if (!exists("COMBO_ID"))
+		defineConstant("COMBO_ID", 0);
+
+	// --- Optional parameters with defaults ---
+	if (!exists("BURNIN"))
+		defineConstant("BURNIN", 10000);
+	if (!exists("COLLECT_INTERVAL"))
+		defineConstant("COLLECT_INTERVAL", 500);
+	if (!exists("N_COLLECTS"))
+		defineConstant("N_COLLECTS", 20);
+	if (!exists("N_REPS"))
+		defineConstant("N_REPS", 500);
+	if (!exists("CLONAL_MEAN"))
+		defineConstant("CLONAL_MEAN", 100);
+	if (!exists("OUTFILE"))
+		defineConstant("OUTFILE", "/scratch/eeg37520/doliolid_slim/sweeps/combo_" + COMBO_ID + "_sweep_results.tsv");
+	if (!exists("LOGFILE"))
+		defineConstant("LOGFILE", "/scratch/eeg37520/doliolid_slim/sweeps/combo_" + COMBO_ID + "_sweep_log.csv");
+	if (!exists("BANKFILE"))
+		defineConstant("BANKFILE", "/scratch/eeg37520/doliolid_slim/sweeps/combo_" + COMBO_ID + "_haplotype_bank.txt");
+
+	defineConstant("GENOME_LENGTH", 15329);
+	defineConstant("PHOROS_PER_NURSE", 3);
+	defineConstant("GONOS_PER_PHORO", 2);
+	defineConstant("EGGS_PER_GONO", 1);
+
+	// End tick = BURNIN + (N_COLLECTS * COLLECT_INTERVAL)
+	defineConstant("END_TICK", BURNIN + N_COLLECTS * COLLECT_INTERVAL);
+
+	// k values for the bloom sweep
+	// Scale max k to ~90% of expected bank size
+	// Expected bank size ~ N_COLLECTS * (K_NURSES * 0.95) [~95% of K occupied]
+	defineConstant("EXPECTED_BANK", asInteger(N_COLLECTS * K_NURSES * 0.95));
+
+	// Build k values: log-spaced from 10 up to ~90% of bank
+	// Always include these milestones plus extras scaled to bank size
+	defineConstant("K_VALUES", c(
+		10, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000,
+		7500, 10000, 15000, 20000, 30000, 50000, 75000, 100000
+	));
+
+	// --- Genetic setup ---
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	m1.mutationStackPolicy = "l";
+	m1.convertToSubstitution = F;
+	initializeGenomicElementType("g1", m1, 1.0);
+
+	initializeChromosome(1, GENOME_LENGTH, type="H");
+	initializeGenomicElement(g1);
+	initializeMutationRate(MU);
+	initializeRecombinationRate(0.0);
+
+	catn("=== BLOOM FOUNDER SWEEP ===");
+	catn("  COMBO_ID:       " + COMBO_ID);
+	catn("  K_NURSES:       " + K_NURSES);
+	catn("  MU:             " + MU);
+	catn("  OOZ_SURVIVAL:   " + OOZ_SURVIVAL);
+	catn("  NURSE_MORT:     " + NURSE_MORT);
+	catn("  BURNIN:         " + BURNIN);
+	catn("  END_TICK:       " + END_TICK);
+	catn("  Expected bank:  ~" + EXPECTED_BANK);
+	catn("  N_REPS:         " + N_REPS);
+	catn("============================");
+}
+
+
+// =============================================================================
+// REPRODUCTION
+// =============================================================================
+reproduction() {
+	if (individual.tag == 1) {
+		for (i in seqLen(PHOROS_PER_NURSE)) {
+			offspring = subpop.addCloned(individual);
+			if (!isNULL(offspring))
+				offspring.tag = 2;
+		}
+	}
+
+	if (individual.tag == 2) {
+		for (i in seqLen(GONOS_PER_PHORO)) {
+			offspring = subpop.addCloned(individual);
+			if (!isNULL(offspring))
+				offspring.tag = 3;
+		}
+	}
+
+	if (individual.tag == 3) {
+		motherHap = individual.haplosomesNonNull;
+		offspring = subpop.addRecombinant(motherHap, NULL, integer(0),
+			NULL, NULL, NULL);
+		if (!isNULL(offspring))
+			offspring.tag = 0;
+	}
+}
+
+
+// =============================================================================
+// FIRST TICK
+// =============================================================================
+1 early() {
+	sim.addSubpop("p1", asInteger(K_NURSES / 10));
+	p1.individuals.tag = 1;
+
+	defineGlobal("HAP_BANK", c());
+	defineGlobal("COLLECTS_DONE", 0);
+
+	log = community.createLogFile(LOGFILE, logInterval=100);
+	log.addCycle();
+	log.addCustomColumn("num_nurses", "sum(p1.individuals.tag == 1);");
+	log.addCustomColumn("total_N", "p1.individualCount;");
+	log.addCustomColumn("pi", "calcNucDivSub();");
+	log.addCustomColumn("bank_size", "size(HAP_BANK);");
+}
+
+
+// =============================================================================
+// EARLY() — parameterized stage transitions and mortality
+// =============================================================================
+early() {
+	if (community.tick == 1) return;
+
+	inds = p1.individuals;
+	if (size(inds) == 0) {
+		catn("EXTINCT at tick " + community.tick);
+		community.simulationFinished();
+		return;
+	}
+
+	// --- Oozooid maturation (parameterized survival) ---
+	oozooids = inds[(inds.tag == 0) & (inds.age >= 1)];
+	if (size(oozooids) > 0) {
+		currentNurses = p1.individuals[p1.individuals.tag == 1];
+		nurseSlots = K_NURSES - size(currentNurses);
+		oozooids = sample(oozooids, size(oozooids));
+		matured = 0;
+		for (ooz in oozooids) {
+			if (runif(1) < OOZ_SURVIVAL & matured < nurseSlots) {
+				ooz.tag = 1;
+				matured = matured + 1;
+			} else {
+				ooz.fitnessScaling = 0.0;
+			}
+		}
+	}
+
+	// --- Nurse mortality (parameterized) ---
+	currentNurses = p1.individuals[p1.individuals.tag == 1];
+	if (size(currentNurses) > 0) {
+		nToKill = asInteger(max(1.0, ceil(size(currentNurses) * NURSE_MORT)));
+		if (nToKill > size(currentNurses))
+			nToKill = size(currentNurses);
+		deadNurses = sample(currentNurses, nToKill);
+		deadNurses.fitnessScaling = 0.0;
+	}
+
+	// --- Ephemeral stage death ---
+	oldPhoros = p1.individuals[(p1.individuals.tag == 2) & (p1.individuals.age >= 1)];
+	if (size(oldPhoros) > 0) oldPhoros.fitnessScaling = 0.0;
+
+	oldGonos = p1.individuals[(p1.individuals.tag == 3) & (p1.individuals.age >= 1)];
+	if (size(oldGonos) > 0) oldGonos.fitnessScaling = 0.0;
+}
+
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+function (float)calcNucDivSub(void) {
+	if (p1.individualCount < 2) return 0.0;
+	haps = p1.individuals.haplosomesNonNull;
+	if (size(haps) < 2) return 0.0;
+	if (size(haps) > 200) {
+		sampledInds = sample(p1.individuals, 200);
+		haps = sampledInds.haplosomesNonNull;
+	}
+	return calcPi(haps);
+}
+
+function (string)getHapString(object<Haplosome>$ hap) {
+	muts = hap.mutations;
+	if (size(muts) == 0)
+		return "anc";
+	return paste(sort(muts.position), sep=",");
+}
+
+function (integer)pairwiseDiffs(string$ hap1, string$ hap2) {
+	if (hap1 == hap2)
+		return 0;
+	if (hap1 == "anc")
+		return size(strsplit(hap2, ","));
+	if (hap2 == "anc")
+		return size(strsplit(hap1, ","));
+	pos1 = asInteger(strsplit(hap1, ","));
+	pos2 = asInteger(strsplit(hap2, ","));
+	shared = setIntersection(pos1, pos2);
+	diffs = size(pos1) + size(pos2) - 2 * size(shared);
+	return diffs;
+}
+
+function (float)piFromStrings(string hapStrings) {
+	n = size(hapStrings);
+	if (n < 2) return 0.0;
+	totalDiffs = 0;
+	nPairs = 0;
+	for (i in 0:(n-2)) {
+		for (j in (i+1):(n-1)) {
+			totalDiffs = totalDiffs + pairwiseDiffs(hapStrings[i], hapStrings[j]);
+			nPairs = nPairs + 1;
+		}
+	}
+	return asFloat(totalDiffs) / (asFloat(nPairs) * GENOME_LENGTH);
+}
+
+function (float)tajDFromStrings(string hapStrings) {
+	n = size(hapStrings);
+	if (n < 4) return 0.0;
+
+	allPos = c();
+	for (hs in hapStrings) {
+		if (hs != "anc")
+			allPos = c(allPos, asInteger(strsplit(hs, ",")));
+	}
+	if (size(allPos) == 0) return 0.0;
+	uniquePos = unique(allPos);
+
+	S = 0;
+	for (pos in uniquePos) {
+		freq = 0;
+		for (hs in hapStrings) {
+			if (hs == "anc") {
+				// ancestral — no mutations
+			} else {
+				positions = asInteger(strsplit(hs, ","));
+				if (any(positions == pos))
+					freq = freq + 1;
+			}
+		}
+		if (freq > 0 & freq < n)
+			S = S + 1;
+	}
+
+	if (S < 2) return 0.0;
+
+	pi = piFromStrings(hapStrings);
+
+	nn = asFloat(n);
+	a1 = 0.0;
+	a2 = 0.0;
+	for (i in 1:(n-1)) {
+		a1 = a1 + 1.0 / i;
+		a2 = a2 + 1.0 / (i * i);
+	}
+
+	b1 = (nn + 1.0) / (3.0 * (nn - 1.0));
+	b2 = 2.0 * (nn * nn + nn + 3.0) / (9.0 * nn * (nn - 1.0));
+	c1 = b1 - 1.0 / a1;
+	c2 = b2 - (nn + 2.0) / (a1 * nn) + a2 / (a1 * a1);
+	e1 = c1 / a1;
+	e2 = c2 / (a1 * a1 + a2);
+
+	theta_pi = pi * GENOME_LENGTH;
+	theta_W = asFloat(S) / a1;
+
+	denom = sqrt(e1 * S + e2 * S * (S - 1.0));
+	if (denom == 0.0) return 0.0;
+
+	return (theta_pi - theta_W) / denom;
+}
+
+// --- Minimum pairwise distance ---
+function (integer)minPairwiseDist(string hapStrings) {
+	n = size(hapStrings);
+	if (n < 2) return 0;
+	minDist = asInteger(GENOME_LENGTH);  // start high
+	for (i in 0:(n-2)) {
+		for (j in (i+1):(n-1)) {
+			d = pairwiseDiffs(hapStrings[i], hapStrings[j]);
+			if (d < minDist)
+				minDist = d;
+		}
+	}
+	return minDist;
+}
+
+// --- Fu's Fs from haplotype strings ---
+// Fs = ln( S'/(1-S') ) where S' = P(k_obs or more haplotypes | theta=pi)
+// Uses the Ewens sampling formula approximation:
+//   P(K >= k | theta) = 1 - sum_{i=1}^{k-1} P(K=i | theta)
+// where P(K=i | theta) uses Stirling numbers (expensive), so we use
+// the recursive approximation from Fu (1997).
+// For computational tractability, we use the infinite-sites estimator:
+//   theta_pi = pi * L (the total pairwise differences estimator)
+//   k = number of distinct haplotypes in the sample
+//   n = sample size
+// Then Fs = ln( S'/(1-S') )
+// where S' is computed from the Ewens sampling formula.
+function (float)fuFsFromStrings(string hapStrings) {
+	n = size(hapStrings);
+	if (n < 4) return 0.0;
+
+	k = size(unique(hapStrings));
+	if (k <= 1) return 0.0;
+
+	theta_pi = piFromStrings(hapStrings) * GENOME_LENGTH;
+	if (theta_pi <= 0.0) return 0.0;
+
+	// Compute P(K >= k_obs | theta_pi) using Ewens sampling formula
+	// via the recursive method for |s(n,k)| (unsigned Stirling numbers
+	// of the first kind, normalized).
+	//
+	// P(K = i | theta) = |s(n,i)| * theta^i / (theta)(theta+1)...(theta+n-1)
+	//
+	// We compute log-scale to avoid overflow.
+	// |s(n,i)| satisfies: |s(n+1,i)| = n*|s(n,i)| + |s(n,i-1)|
+	// with |s(1,1)| = 1
+
+	// First compute the denominator: log(theta * (theta+1) * ... * (theta+n-1))
+	logDenom = 0.0;
+	for (i in 0:(n-1))
+		logDenom = logDenom + log(theta_pi + i);
+
+	// Compute log |s(n,i)| for i = 1..k using the recurrence
+	// We only need up to i = k, not all n
+	// Store log |s(j,i)| as we build up j from 1 to n
+	// Start: log|s(1,1)| = 0 (i.e., |s(1,1)| = 1)
+
+	// We need a 2D approach but n can be 120, k can be 120
+	// Use a vector for the current row: logS[i] = log|s(j,i)| for i=1..min(j,k)
+	// Initialize for j=1
+	maxK = min(k, n);
+	logS = rep(-INF, maxK);  // logS[0] = log|s(1,1)|, ..., logS[maxK-1] = log|s(1,maxK)|
+	logS[0] = 0.0;  // log|s(1,1)| = log(1) = 0
+
+	for (j in 2:n) {
+		newLogS = rep(-INF, maxK);
+		for (i in 1:min(j, maxK)) {
+			// |s(j,i)| = (j-1)*|s(j-1,i)| + |s(j-1,i-1)|
+			idx = i - 1;  // 0-based index
+
+			logTerm1 = -INF;
+			if (idx < size(logS))
+				if (logS[idx] > -INF)
+					logTerm1 = log(asFloat(j - 1)) + logS[idx];
+
+			logTerm2 = -INF;
+			if (idx > 0)
+				if (logS[idx - 1] > -INF)
+					logTerm2 = logS[idx - 1];
+
+			// log(a + b) = log(a) + log(1 + exp(log(b) - log(a)))
+			if (logTerm1 == -INF & logTerm2 == -INF) {
+				newLogS[idx] = -INF;
+			} else if (logTerm1 >= logTerm2) {
+				if (logTerm2 == -INF)
+					newLogS[idx] = logTerm1;
+				else
+					newLogS[idx] = logTerm1 + log(1.0 + exp(logTerm2 - logTerm1));
+			} else {
+				if (logTerm1 == -INF)
+					newLogS[idx] = logTerm2;
+				else
+					newLogS[idx] = logTerm2 + log(1.0 + exp(logTerm1 - logTerm2));
+			}
+		}
+		logS = newLogS;
+	}
+
+	// Now compute P(K >= k_obs) = 1 - sum_{i=1}^{k-1} P(K=i)
+	// P(K=i) = exp( logS[i-1] + i*log(theta) - logDenom )
+	cumProb = 0.0;
+	for (i in 1:(k-1)) {
+		idx = i - 1;
+		if (idx >= size(logS)) next;
+		if (logS[idx] == -INF) next;
+		logP = logS[idx] + asFloat(i) * log(theta_pi) - logDenom;
+		if (logP > 0.0) logP = 0.0;  // numerical safety
+		cumProb = cumProb + exp(logP);
+	}
+
+	Sprime = 1.0 - cumProb;
+	if (Sprime <= 0.0) Sprime = 1e-300;
+	if (Sprime >= 1.0) Sprime = 1.0 - 1e-10;
+
+	return log(Sprime / (1.0 - Sprime));
+}
+
+function (void)writeBloomStatsFromBank(integer$ k, integer$ rep, integer$ n,
+	string bankHaps, float$ bgPi, integer$ bankSize, string$ outfile)
+{
+	founderIdx = sample(seqLen(bankSize), k);
+	founderStrings = bankHaps[founderIdx];
+
+	bloomIdx = c();
+	for (i in seqLen(k)) {
+		nClones = rpois(1, CLONAL_MEAN);
+		if (nClones < 1) nClones = 1;
+		bloomIdx = c(bloomIdx, rep(i, nClones));
+	}
+
+	if (size(bloomIdx) < n)
+		sampIdx = sample(bloomIdx, n, replace=T);
+	else
+		sampIdx = sample(bloomIdx, n);
+
+	sampleStrings = founderStrings[sampIdx];
+
+	nUnique = size(unique(sampleStrings));
+	pi = piFromStrings(sampleStrings);
+	tajD = tajDFromStrings(sampleStrings);
+	minDist = minPairwiseDist(sampleStrings);
+	fuFs = fuFsFromStrings(sampleStrings);
+
+	line = COMBO_ID + "\t" + k + "\t" + rep + "\t" + n + "\t" +
+		nUnique + "\t" +
+		format("%.8f", pi) + "\t" +
+		format("%.4f", tajD) + "\t" +
+		format("%.4f", fuFs) + "\t" +
+		minDist + "\t" +
+		format("%.8f", bgPi) + "\t" +
+		bankSize;
+	writeFile(outfile, line, append=T);
+}
+
+
+// =============================================================================
+// PROGRESS MONITOR
+// =============================================================================
+1: late() {
+	if (community.tick % 500 != 0) return;
+	if (community.tick > END_TICK) return;
+
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	pi = calcNucDivSub();
+	catn("Tick " + community.tick + ": " +
+		size(nurses) + " nurses, pi=" +
+		format("%.6f", pi) + ", bank=" + size(HAP_BANK) +
+		" [combo " + COMBO_ID + "]");
+}
+
+
+// =============================================================================
+// HAPLOTYPE COLLECTION
+// =============================================================================
+1: late() {
+	if (community.tick <= BURNIN) return;
+	if (community.tick > END_TICK) return;
+	if ((community.tick - BURNIN) % COLLECT_INTERVAL != 0) return;
+
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	newHaps = c();
+	for (nurse in nurses)
+		newHaps = c(newHaps, getHapString(nurse.haplosomesNonNull));
+
+	defineGlobal("HAP_BANK", c(HAP_BANK, newHaps));
+	defineGlobal("COLLECTS_DONE", COLLECTS_DONE + 1);
+
+	catn("  Collected " + size(newHaps) + " haplotypes at tick " +
+		community.tick + " (harvest " + COLLECTS_DONE + "/" +
+		N_COLLECTS + ", bank=" + size(HAP_BANK) + ")");
+}
+
+
+// =============================================================================
+// BLOOM SAMPLING SWEEP — runs at END_TICK
+// =============================================================================
+END_TICK late() {
+
+	bankSize = size(HAP_BANK);
+	bgPi = piFromStrings(sample(HAP_BANK, min(200, bankSize)));
+
+	catn("\n================================================");
+	catn("  COLLECTION COMPLETE — COMBO " + COMBO_ID);
+	catn("  Haplotype bank size: " + bankSize);
+	catn("  Unique haplotypes:   " + size(unique(HAP_BANK)));
+	catn("  Background pi (est): " + format("%.6f", bgPi));
+	catn("  K_NURSES:            " + K_NURSES);
+	catn("  OOZ_SURVIVAL:        " + OOZ_SURVIVAL);
+	catn("  NURSE_MORT:          " + NURSE_MORT);
+	catn("  MU:                  " + MU);
+	catn("================================================\n");
+
+	// Write header
+	writeFile(OUTFILE, "combo_id\tk\trep\tn\tn_unique\tpi\ttajD\tfuFs\tmin_pairwise\tbg_pi\tn_haps_in_bank");
+
+	sampleSizes = c(12, 120);
+
+	for (kVal in K_VALUES) {
+		if (kVal > bankSize) {
+			catn("  Skipping k=" + kVal +
+				" (exceeds bank size " + bankSize + ")");
+			next;
+		}
+
+		catn("  k=" + kVal + " (" + N_REPS + " reps)...");
+
+		for (rep in seqLen(N_REPS)) {
+			for (n in sampleSizes) {
+				writeBloomStatsFromBank(kVal, rep, n,
+					HAP_BANK, bgPi, bankSize, OUTFILE);
+			}
+		}
+	}
+
+	catn("\n================================================");
+	catn("  BLOOM SAMPLING COMPLETE — COMBO " + COMBO_ID);
+	catn("  Results: " + OUTFILE);
+	catn("================================================");
+
+	// Save the haplotype bank to disk for post-hoc analyses (Snn, etc.)
+	catn("  Saving haplotype bank to " + BANKFILE + "...");
+	writeFile(BANKFILE, HAP_BANK);
+	catn("  Bank saved (" + size(HAP_BANK) + " haplotypes).");
+
+	community.simulationFinished();
+}

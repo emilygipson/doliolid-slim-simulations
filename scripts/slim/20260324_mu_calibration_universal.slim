@@ -1,0 +1,217 @@
+// =============================================================================
+// MU CALIBRATION — UNIVERSAL PARAMETERIZED VERSION
+// =============================================================================
+// Accepts all life cycle parameters via -d flags on the command line.
+// Runs for END_TICK ticks, logging pi every 100 ticks to a CSV.
+// Used to find the mutation rate that produces equilibrium pi ~ 0.0066
+// for each combination of K_NURSES, OOZ_SURVIVAL, and NURSE_MORTALITY.
+//
+// Usage:
+//   slim -d K_NURSES=5000 -d MU=4.94e-7 -d OOZ_SURVIVAL=0.25 \
+//        -d NURSE_MORTALITY=0.05 -d COMBO_ID=1 \
+//        -d "LOGDIR='/scratch/eeg37520/doliolid_slim/calibration_logs'" \
+//        20260324_mu_calibration_universal.slim
+//
+// Emily Gipson, UGA mfflab
+// Created: 2026-03-24
+// =============================================================================
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+
+	// --- Externally defined parameters (via -d flags) ---
+	if (!exists("K_NURSES"))
+		defineConstant("K_NURSES", 5000);
+	if (!exists("MU"))
+		defineConstant("MU", 2.47e-7);
+	if (!exists("OOZ_SURVIVAL"))
+		defineConstant("OOZ_SURVIVAL", 0.50);
+	if (!exists("NURSE_MORTALITY"))
+		defineConstant("NURSE_MORTALITY", 0.05);
+	if (!exists("COMBO_ID"))
+		defineConstant("COMBO_ID", 0);
+	if (!exists("LOGDIR"))
+		defineConstant("LOGDIR", "/scratch/eeg37520/doliolid_slim/calibration_logs");
+	if (!exists("END_TICK"))
+		defineConstant("END_TICK", 30000);
+
+	// --- Fixed life cycle parameters ---
+	defineConstant("GENOME_LENGTH", 15329);
+	defineConstant("PHOROS_PER_NURSE", 3);
+	defineConstant("GONOS_PER_PHORO", 2);
+	defineConstant("EGGS_PER_GONO", 1);
+
+	// --- Genetic setup ---
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	m1.mutationStackPolicy = "l";
+	m1.convertToSubstitution = F;
+	initializeGenomicElementType("g1", m1, 1.0);
+
+	initializeChromosome(1, GENOME_LENGTH, type="H");
+	initializeGenomicElement(g1);
+	initializeMutationRate(MU);
+	initializeRecombinationRate(0.0);
+}
+
+
+// =============================================================================
+// REPRODUCTION
+// =============================================================================
+reproduction() {
+	if (individual.tag == 1) {
+		for (i in seqLen(PHOROS_PER_NURSE)) {
+			offspring = subpop.addCloned(individual);
+			if (!isNULL(offspring))
+				offspring.tag = 2;
+		}
+	}
+
+	if (individual.tag == 2) {
+		for (i in seqLen(GONOS_PER_PHORO)) {
+			offspring = subpop.addCloned(individual);
+			if (!isNULL(offspring))
+				offspring.tag = 3;
+		}
+	}
+
+	if (individual.tag == 3) {
+		motherHap = individual.haplosomesNonNull;
+		offspring = subpop.addRecombinant(motherHap, NULL, integer(0),
+			NULL, NULL, NULL);
+		if (!isNULL(offspring))
+			offspring.tag = 0;
+	}
+}
+
+
+// =============================================================================
+// FIRST TICK
+// =============================================================================
+1 early() {
+	sim.addSubpop("p1", asInteger(K_NURSES / 10));
+	p1.individuals.tag = 1;
+
+	defineConstant("LOGPATH", LOGDIR + "/calibration_combo" +
+		COMBO_ID + "_K" + K_NURSES + "_mu" + format("%.1e", MU) +
+		"_ooz" + asInteger(OOZ_SURVIVAL * 100) +
+		"_mort" + asInteger(NURSE_MORTALITY * 100) + ".csv");
+
+	log = community.createLogFile(LOGPATH, logInterval=100);
+	log.addCycle();
+	log.addCustomColumn("num_nurses", "sum(p1.individuals.tag == 1);");
+	log.addCustomColumn("total_N", "p1.individualCount;");
+	log.addCustomColumn("pi", "calcNucDivSub();");
+
+	catn("=== CALIBRATION RUN ===");
+	catn("  Combo ID:        " + COMBO_ID);
+	catn("  K_NURSES:        " + K_NURSES);
+	catn("  MU:              " + format("%.2e", MU));
+	catn("  OOZ_SURVIVAL:    " + OOZ_SURVIVAL);
+	catn("  NURSE_MORTALITY: " + NURSE_MORTALITY);
+	catn("  END_TICK:        " + END_TICK);
+	catn("  Log:             " + LOGPATH);
+	catn("=======================");
+}
+
+
+// =============================================================================
+// EARLY() — stage transitions and mortality
+// =============================================================================
+early() {
+	if (community.tick == 1) return;
+
+	inds = p1.individuals;
+	if (size(inds) == 0) {
+		catn("EXTINCT at tick " + community.tick);
+		community.simulationFinished();
+		return;
+	}
+
+	// Oozooid maturation
+	oozooids = inds[(inds.tag == 0) & (inds.age >= 1)];
+	if (size(oozooids) > 0) {
+		currentNurses = p1.individuals[p1.individuals.tag == 1];
+		nurseSlots = K_NURSES - size(currentNurses);
+		oozooids = sample(oozooids, size(oozooids));
+		matured = 0;
+		for (ooz in oozooids) {
+			if (runif(1) < OOZ_SURVIVAL & matured < nurseSlots) {
+				ooz.tag = 1;
+				matured = matured + 1;
+			} else {
+				ooz.fitnessScaling = 0.0;
+			}
+		}
+	}
+
+	// Nurse mortality
+	currentNurses = p1.individuals[p1.individuals.tag == 1];
+	if (size(currentNurses) > 0) {
+		nToKill = asInteger(max(1.0, ceil(size(currentNurses) * NURSE_MORTALITY)));
+		if (nToKill > size(currentNurses))
+			nToKill = size(currentNurses);
+		deadNurses = sample(currentNurses, nToKill);
+		deadNurses.fitnessScaling = 0.0;
+	}
+
+	// Ephemeral stage death
+	oldPhoros = p1.individuals[(p1.individuals.tag == 2) & (p1.individuals.age >= 1)];
+	if (size(oldPhoros) > 0) oldPhoros.fitnessScaling = 0.0;
+
+	oldGonos = p1.individuals[(p1.individuals.tag == 3) & (p1.individuals.age >= 1)];
+	if (size(oldGonos) > 0) oldGonos.fitnessScaling = 0.0;
+}
+
+
+// =============================================================================
+// HELPER: subsampled pi
+// =============================================================================
+function (float)calcNucDivSub(void) {
+	if (p1.individualCount < 2) return 0.0;
+	haps = p1.individuals.haplosomesNonNull;
+	if (size(haps) < 2) return 0.0;
+	if (size(haps) > 200) {
+		sampledInds = sample(p1.individuals, 200);
+		haps = sampledInds.haplosomesNonNull;
+	}
+	return calcPi(haps);
+}
+
+
+// =============================================================================
+// PROGRESS MONITOR
+// =============================================================================
+1: late() {
+	if (community.tick % 1000 != 0) return;
+	if (community.tick > END_TICK) return;
+
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	pi = calcNucDivSub();
+	catn("Tick " + community.tick + ": " +
+		size(nurses) + " nurses, pi=" +
+		format("%.6f", pi));
+}
+
+
+// =============================================================================
+// FINAL REPORT
+// =============================================================================
+END_TICK late() {
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	pi = calcNucDivSub();
+
+	catn("\n=== CALIBRATION COMPLETE ===");
+	catn("  Combo ID:        " + COMBO_ID);
+	catn("  K_NURSES:        " + K_NURSES);
+	catn("  MU:              " + format("%.2e", MU));
+	catn("  OOZ_SURVIVAL:    " + OOZ_SURVIVAL);
+	catn("  NURSE_MORTALITY: " + NURSE_MORTALITY);
+	catn("  Final nurses:    " + size(nurses));
+	catn("  Final pi:        " + format("%.6f", pi));
+	catn("  Target pi:       0.006600");
+	catn("  Ratio:           " + format("%.3f", pi / 0.0066));
+	catn("  Log:             " + LOGPATH);
+	catn("============================");
+
+	community.simulationFinished();
+}

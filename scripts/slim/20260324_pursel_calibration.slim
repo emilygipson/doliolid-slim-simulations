@@ -1,0 +1,299 @@
+// =============================================================================
+// MU CALIBRATION — PURIFYING SELECTION, PER-GENE RESOLUTION
+// =============================================================================
+//
+// Same life cycle as neutral calibration, but the genome is partitioned
+// into 13 coding genes (with gene-specific neutral/deleterious ratios
+// based on empirical dN/dS) and non-coding regions (neutral only).
+//
+// Deleterious mutations (m2) are either:
+//   DFE_TYPE="fixed": all have selection coefficient SEL_COEFF
+//   DFE_TYPE="gamma": drawn from gamma(SEL_COEFF, GAMMA_SHAPE)
+//
+// Life cycle fixed at combo 4: K=5000, OOZ_SURVIVAL=0.50, NURSE_MORT=0.05
+//
+// Usage:
+//   slim -d "DFE_TYPE='fixed'" -d SEL_COEFF=-0.1 -d PURSEL_ID=2 \
+//        -d MU=2.47e-7 \
+//        -d "LOGFILE='/path/to/log.csv'" \
+//        20260324_pursel_calibration.slim
+//
+// Emily Gipson, UGA mfflab
+// Created: 2026-03-24
+// =============================================================================
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+
+	// --- Required parameters ---
+	if (!exists("DFE_TYPE"))
+		stop("DFE_TYPE must be 'fixed' or 'gamma'");
+	if (!exists("SEL_COEFF"))
+		stop("SEL_COEFF must be defined (negative value)");
+	if (!exists("MU"))
+		stop("MU must be defined via -d flag");
+	if (!exists("PURSEL_ID"))
+		defineConstant("PURSEL_ID", 0);
+
+	// Gamma shape (only used if DFE_TYPE="gamma")
+	if (!exists("GAMMA_SHAPE"))
+		defineConstant("GAMMA_SHAPE", 0.3);
+
+	if (!exists("LOGFILE"))
+		defineConstant("LOGFILE", "/scratch/eeg37520/doliolid_slim/pursel_calibration/pursel_" + PURSEL_ID + "_calibration_log.csv");
+
+	// --- Life cycle parameters (fixed at combo 4) ---
+	defineConstant("K_NURSES", 5000);
+	defineConstant("OOZ_SURVIVAL", 0.50);
+	defineConstant("NURSE_MORT", 0.05);
+	defineConstant("GENOME_LENGTH", 15329);
+	defineConstant("PHOROS_PER_NURSE", 3);
+	defineConstant("GONOS_PER_PHORO", 2);
+	defineConstant("EGGS_PER_GONO", 1);
+	defineConstant("END_TICK", 30000);
+
+	// --- Mutation types ---
+	// m1: neutral (synonymous + non-coding)
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	m1.mutationStackPolicy = "l";
+	m1.convertToSubstitution = F;
+
+	// m2: deleterious (nonsynonymous at coding sites)
+	if (DFE_TYPE == "fixed") {
+		initializeMutationType("m2", 0.5, "f", SEL_COEFF);
+	} else if (DFE_TYPE == "gamma") {
+		initializeMutationType("m2", 0.5, "g", SEL_COEFF, GAMMA_SHAPE);
+	} else {
+		stop("DFE_TYPE must be 'fixed' or 'gamma'");
+	}
+	m2.mutationStackPolicy = "l";
+	m2.convertToSubstitution = F;
+
+	// --- Genomic element types ---
+	// g1: non-coding (neutral only)
+	initializeGenomicElementType("g1", m1, 1.0);
+
+	// g2-g14: coding genes (mixture of neutral m1 + deleterious m2)
+	// Fraction neutral at coding site = 0.25 + 0.75 * dN/dS
+	// Fraction deleterious = 0.75 * (1 - dN/dS)
+	initializeGenomicElementType("g2",  c(m1, m2), c(0.2900, 0.7100));  // nad4  dN/dS=0.0533
+	initializeGenomicElementType("g3",  c(m1, m2), c(0.4079, 0.5921));  // nad6  dN/dS=0.2105
+	initializeGenomicElementType("g4",  c(m1, m2), c(0.3037, 0.6963));  // cox3  dN/dS=0.0716
+	initializeGenomicElementType("g5",  c(m1, m2), c(0.2754, 0.7246));  // cox2  dN/dS=0.0339
+	initializeGenomicElementType("g6",  c(m1, m2), c(0.3056, 0.6944));  // cob   dN/dS=0.0742
+	initializeGenomicElementType("g7",  c(m1, m2), c(0.2915, 0.7085));  // nad4l dN/dS=0.0553
+	initializeGenomicElementType("g8",  c(m1, m2), c(0.3398, 0.6602));  // nad3  dN/dS=0.1198
+	initializeGenomicElementType("g9",  c(m1, m2), c(0.3058, 0.6942));  // nad5  dN/dS=0.0744
+	initializeGenomicElementType("g10", c(m1, m2), c(0.2690, 0.7310));  // atp6  dN/dS=0.0253
+	initializeGenomicElementType("g11", c(m1, m2), c(0.2937, 0.7064));  // cox1  dN/dS=0.0582
+	initializeGenomicElementType("g12", c(m1, m2), c(0.3189, 0.6812));  // atp8  dN/dS=0.0918
+	initializeGenomicElementType("g13", c(m1, m2), c(0.3072, 0.6928));  // nad1  dN/dS=0.0763
+	initializeGenomicElementType("g14", c(m1, m2), c(0.3381, 0.6619));  // nad2  dN/dS=0.1175
+
+	// --- Chromosome setup (haploid type "H") ---
+	initializeChromosome(1, GENOME_LENGTH, type="H");
+
+	// --- Genomic elements: 13 genes + 12 intergenic regions ---
+	// Overlaps resolved: cox2/cob overlap -> cox2; nad4l/nad3 overlap -> nad4l
+	initializeGenomicElement(g1,  0,     228);    // nc before nad4 (229 bp)
+	initializeGenomicElement(g2,  229,   1557);   // nad4 (1329 bp)
+	initializeGenomicElement(g1,  1558,  3104);   // nc (1547 bp)
+	initializeGenomicElement(g3,  3105,  3590);   // nad6 (486 bp)
+	initializeGenomicElement(g1,  3591,  4449);   // nc (859 bp)
+	initializeGenomicElement(g4,  4450,  5244);   // cox3 (795 bp)
+	initializeGenomicElement(g1,  5245,  5367);   // nc (123 bp)
+	initializeGenomicElement(g5,  5368,  6033);   // cox2 (666 bp)
+	initializeGenomicElement(g6,  6034,  7096);   // cob (1063 bp, truncated)
+	initializeGenomicElement(g1,  7097,  7340);   // nc (244 bp)
+	initializeGenomicElement(g7,  7341,  7601);   // nad4l (261 bp)
+	initializeGenomicElement(g8,  7602,  7933);   // nad3 (332 bp, truncated)
+	initializeGenomicElement(g1,  7934,  8453);   // nc (520 bp)
+	initializeGenomicElement(g9,  8454,  10139);  // nad5 (1686 bp)
+	initializeGenomicElement(g1,  10140, 10216);  // nc (77 bp)
+	initializeGenomicElement(g10, 10217, 10846);  // atp6 (630 bp)
+	initializeGenomicElement(g1,  10847, 10928);  // nc (82 bp)
+	initializeGenomicElement(g11, 10929, 12479);  // cox1 (1551 bp)
+	initializeGenomicElement(g1,  12480, 12591);  // nc (112 bp)
+	initializeGenomicElement(g12, 12592, 12738);  // atp8 (147 bp)
+	initializeGenomicElement(g1,  12739, 12896);  // nc (158 bp)
+	initializeGenomicElement(g13, 12897, 13805);  // nad1 (909 bp)
+	initializeGenomicElement(g1,  13806, 13929);  // nc (124 bp)
+	initializeGenomicElement(g14, 13930, 14937);  // nad2 (1008 bp)
+	initializeGenomicElement(g1,  14938, 15328);  // nc after nad2 (391 bp)
+
+	initializeMutationRate(MU);
+	initializeRecombinationRate(0.0);
+
+	catn("=== PURIFYING SELECTION CALIBRATION ===");
+	catn("  PURSEL_ID:     " + PURSEL_ID);
+	catn("  DFE_TYPE:      " + DFE_TYPE);
+	catn("  SEL_COEFF:     " + SEL_COEFF);
+	if (DFE_TYPE == "gamma")
+		catn("  GAMMA_SHAPE:   " + GAMMA_SHAPE);
+	catn("  MU:            " + MU);
+	catn("  K_NURSES:      " + K_NURSES);
+	catn("  END_TICK:      " + END_TICK);
+	catn("========================================");
+}
+
+
+// =============================================================================
+// REPRODUCTION (identical to neutral version)
+// =============================================================================
+reproduction() {
+	if (individual.tag == 1) {
+		for (i in seqLen(PHOROS_PER_NURSE)) {
+			offspring = subpop.addCloned(individual);
+			if (!isNULL(offspring))
+				offspring.tag = 2;
+		}
+	}
+
+	if (individual.tag == 2) {
+		for (i in seqLen(GONOS_PER_PHORO)) {
+			offspring = subpop.addCloned(individual);
+			if (!isNULL(offspring))
+				offspring.tag = 3;
+		}
+	}
+
+	if (individual.tag == 3) {
+		motherHap = individual.haplosomesNonNull;
+		offspring = subpop.addRecombinant(motherHap, NULL, integer(0),
+			NULL, NULL, NULL);
+		if (!isNULL(offspring))
+			offspring.tag = 0;
+	}
+}
+
+
+// =============================================================================
+// FIRST TICK
+// =============================================================================
+1 early() {
+	sim.addSubpop("p1", asInteger(K_NURSES / 10));
+	p1.individuals.tag = 1;
+
+	log = community.createLogFile(LOGFILE, logInterval=100);
+	log.addCycle();
+	log.addCustomColumn("num_nurses", "sum(p1.individuals.tag == 1);");
+	log.addCustomColumn("total_N", "p1.individualCount;");
+	log.addCustomColumn("pi", "calcNucDivSub();");
+	log.addCustomColumn("num_m2", "sum(sim.mutationCounts(NULL) > 0 & sim.mutations.mutationType == m2);");
+	log.addCustomColumn("pursel_id", "PURSEL_ID;");
+}
+
+
+// =============================================================================
+// EARLY() — stage transitions and mortality
+// =============================================================================
+early() {
+	if (community.tick == 1) return;
+
+	inds = p1.individuals;
+	if (size(inds) == 0) {
+		catn("EXTINCT at tick " + community.tick);
+		community.simulationFinished();
+		return;
+	}
+
+	oozooids = inds[(inds.tag == 0) & (inds.age >= 1)];
+	if (size(oozooids) > 0) {
+		currentNurses = p1.individuals[p1.individuals.tag == 1];
+		nurseSlots = K_NURSES - size(currentNurses);
+		oozooids = sample(oozooids, size(oozooids));
+		matured = 0;
+		for (ooz in oozooids) {
+			if (runif(1) < OOZ_SURVIVAL & matured < nurseSlots) {
+				ooz.tag = 1;
+				matured = matured + 1;
+			} else {
+				ooz.fitnessScaling = 0.0;
+			}
+		}
+	}
+
+	currentNurses = p1.individuals[p1.individuals.tag == 1];
+	if (size(currentNurses) > 0) {
+		nToKill = asInteger(max(1.0, ceil(size(currentNurses) * NURSE_MORT)));
+		if (nToKill > size(currentNurses))
+			nToKill = size(currentNurses);
+		deadNurses = sample(currentNurses, nToKill);
+		deadNurses.fitnessScaling = 0.0;
+	}
+
+	oldPhoros = p1.individuals[(p1.individuals.tag == 2) & (p1.individuals.age >= 1)];
+	if (size(oldPhoros) > 0) oldPhoros.fitnessScaling = 0.0;
+
+	oldGonos = p1.individuals[(p1.individuals.tag == 3) & (p1.individuals.age >= 1)];
+	if (size(oldGonos) > 0) oldGonos.fitnessScaling = 0.0;
+}
+
+
+// =============================================================================
+// HELPER: subsampled pi (neutral mutations only)
+// =============================================================================
+function (float)calcNucDivSub(void) {
+	if (p1.individualCount < 2) return 0.0;
+	haps = p1.individuals.haplosomesNonNull;
+	if (size(haps) < 2) return 0.0;
+	if (size(haps) > 200) {
+		sampledInds = sample(p1.individuals, 200);
+		haps = sampledInds.haplosomesNonNull;
+	}
+	// Compute pi on ALL mutations (neutral + deleterious segregating)
+	// This matches what you'd observe in real sequence data
+	return calcPi(haps);
+}
+
+
+// =============================================================================
+// PROGRESS MONITOR
+// =============================================================================
+1: late() {
+	if (community.tick % 1000 != 0) return;
+	if (community.tick > END_TICK) return;
+
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	pi = calcNucDivSub();
+
+	// Count segregating deleterious mutations
+	allMuts = sim.mutations;
+	nDel = sum(allMuts.mutationType == m2);
+
+	catn("Tick " + community.tick + ": " +
+		size(nurses) + " nurses, pi=" +
+		format("%.6f", pi) +
+		", seg_del=" + nDel +
+		" [pursel " + PURSEL_ID + "]");
+}
+
+
+// =============================================================================
+// FINAL REPORT
+// =============================================================================
+END_TICK late() {
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	pi = calcNucDivSub();
+
+	allMuts = sim.mutations;
+	nDel = sum(allMuts.mutationType == m2);
+	nNeu = sum(allMuts.mutationType == m1);
+
+	catn("\n================================================");
+	catn("  PURSEL CALIBRATION COMPLETE — ID " + PURSEL_ID);
+	catn("  DFE_TYPE:      " + DFE_TYPE);
+	catn("  SEL_COEFF:     " + SEL_COEFF);
+	if (DFE_TYPE == "gamma")
+		catn("  GAMMA_SHAPE:   " + GAMMA_SHAPE);
+	catn("  MU:            " + MU);
+	catn("  Final nurses:  " + size(nurses));
+	catn("  Final pi:      " + format("%.6f", pi));
+	catn("  Target pi:     0.006600");
+	catn("  Ratio:         " + format("%.3f", pi / 0.0066));
+	catn("  Seg neutral:   " + nNeu);
+	catn("  Seg deleter:   " + nDel);
+	catn("================================================");
+
+	community.simulationFinished();
+}
