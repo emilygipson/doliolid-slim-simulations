@@ -1,0 +1,247 @@
+// 20260407_independent_bank_K25k.slim
+//
+// Independent-runs haplotype bank construction for the doliolid bloom
+// founder simulation. One SLiM invocation = one independent replicate
+// = one haplotype written to disk. The full bank is built by submitting
+// this script as a SLURM array job (one task per replicate) and
+// concatenating the per-task output files afterward.
+//
+// Why independent runs instead of serial snapshots:
+// The original bank construction took N snapshots from a single
+// evolving population at COLLECT_INTERVAL spacing. Adjacent snapshots
+// share most of their genealogical history, so the bank saturates at
+// a diversity ceiling well below the true population diversity --
+// even at K_NURSES = 25000. The n_unique sweep statistic plateaus
+// below 120/120 as a result. Drawing one haplotype from each of N
+// independent runs eliminates the temporal autocorrelation entirely:
+// every bank entry comes from a fully independent realization of the
+// drift process.
+//
+// What this script does:
+//   1. Initialize a haploid mtDNA chromosome at the 11k filtered length.
+//   2. Seed a population of K_NURSES nurses.
+//   3. Run the doliolid life cycle (oozooid -> nurse -> phoro -> gono ->
+//      oozooid) for BURNIN ticks.
+//   4. At tick BURNIN, sample one nurse, convert its mutations to a
+//      position-string, write it to disk, and exit.
+//
+// Each task in the SLURM array is invoked with a unique TASK_ID, used
+// as the RNG seed and as the per-task output filename, so the array's
+// output is N independent files of one line each. These get cat'd into
+// the final bank file.
+//
+// Required command-line constants (passed via -d):
+//   TASK_ID    integer, used for seed and output filename
+//   OUT_DIR    string,  directory to write per-task bank line into
+//   K_NURSES   integer, nurse carrying capacity (e.g. 25000)
+//   MU         float,   per-site per-tick mutation rate
+//   BURNIN     integer, number of ticks to run before sampling
+//   OOZ_SURVIVAL  float, oozooid -> nurse survival prob (e.g. 0.50)
+//   NURSE_MORT    float, per-tick nurse mortality (e.g. 0.05)
+//
+// BURNIN must be defined via -d before SLiM parses the script, because
+// the terminal late() block uses BURNIN in its tick spec.
+
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+	
+	// 11k filtered alignment length. Matches the empirical alignment
+	// used for all summary statistics.
+	initializeChromosome(1, 11016, type="H");
+	
+	// initializeChromosome must come before mutation/recombination rates.
+	initializeMutationRate(exists("MU") ? MU else 4.3e-6);
+	initializeRecombinationRate(0.0);
+	
+	// Single neutral mutation type. "l" = last-mutation-wins on the
+	// same site, approximating infinite-sites. convertToSubstitution
+	// must be F so fixed mutations stay visible in the haplotype string.
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	m1.mutationStackPolicy = "l";
+	m1.convertToSubstitution = F;
+	
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1, 0, 11015);
+	
+	// Defaults if -d constants weren't passed in
+	if (!exists("K_NURSES"))    defineConstant("K_NURSES", 25000);
+	if (!exists("BURNIN"))      defineConstant("BURNIN", 160000);
+	if (!exists("OOZ_SURVIVAL")) defineConstant("OOZ_SURVIVAL", 0.50);
+	if (!exists("NURSE_MORT"))  defineConstant("NURSE_MORT", 0.05);
+	if (!exists("TASK_ID"))     defineConstant("TASK_ID", 1);
+	if (!exists("OUT_DIR"))     defineConstant("OUT_DIR", ".");
+	
+	// Per-stage budding fecundities. Same as the production sweep so
+	// the demographic dynamics are identical.
+	defineConstant("PHOROS_PER_NURSE", 3);
+	defineConstant("GONOS_PER_PHORO", 2);
+	defineConstant("EGGS_PER_GONO", 1);
+	
+	// RNG seed: deterministic per task so the run is reproducible,
+	// but distinct across array tasks.
+	setSeed(TASK_ID);
+}
+
+
+// =============================================================================
+// REPRODUCTION
+// One callback handling all four life stages, dispatched on tag.
+// tag 1 = nurse  (buds phorozooids clonally)
+// tag 2 = phoro  (buds gonozooids clonally)
+// tag 3 = gono   (sexual; egg uses maternal mtDNA only)
+// tag 0 = ooz    (juvenile, does not reproduce)
+// =============================================================================
+reproduction() {
+	if (individual.tag == 1) {
+		for (i in seqLen(PHOROS_PER_NURSE)) {
+			off = subpop.addCloned(individual);
+			if (!isNULL(off))
+				off.tag = 2;
+		}
+	}
+	else if (individual.tag == 2) {
+		for (i in seqLen(GONOS_PER_PHORO)) {
+			off = subpop.addCloned(individual);
+			if (!isNULL(off))
+				off.tag = 3;
+		}
+	}
+	else if (individual.tag == 3) {
+		// Sexual stage. mtDNA is maternally inherited so the sperm
+		// donor identity doesn't matter for the haplosome -- but we
+		// still go through the motions to keep the life cycle correct.
+		// addRecombinant with motherHap and NULL parent2 args is the
+		// idiom for strict maternal inheritance on a haploid type "H"
+		// chromosome. addCrossed() would 50/50 coin-flip the parent
+		// and addSelfed() doesn't work on haploid.
+		motherHap = individual.haplosomesNonNull[0];
+		for (i in seqLen(EGGS_PER_GONO)) {
+			off = subpop.addRecombinant(motherHap, NULL, integer(0),
+			                             NULL, NULL, NULL);
+			if (!isNULL(off))
+				off.tag = 0;
+		}
+	}
+}
+
+
+// =============================================================================
+// FIRST TICK SETUP
+// Seed the population with K_NURSES nurses. They will start budding
+// in tick 2's reproduction() call.
+// =============================================================================
+1 early() {
+	sim.addSubpop("p1", K_NURSES);
+	p1.individuals.tag = 1;
+}
+
+
+// =============================================================================
+// EARLY: population regulation
+// Runs every tick AFTER reproduction generates new offspring.
+//   - Mature surviving oozooids into nurses.
+//   - Apply nurse mortality.
+//   - Kill ephemeral phoros and gonos at age >= 1 (they only live
+//     one tick after being budded).
+//   - Cap nurses at K_NURSES.
+// =============================================================================
+early() {
+	inds = p1.individuals;
+	
+	// Oozooid maturation: age >= 1 oozooids become nurses with
+	// probability OOZ_SURVIVAL, otherwise die.
+	matureOoz = inds[(inds.tag == 0) & (inds.age >= 1)];
+	if (size(matureOoz) > 0) {
+		survives = runif(size(matureOoz)) < OOZ_SURVIVAL;
+		matureOoz[survives].tag = 1;
+		matureOoz[!survives].fitnessScaling = 0.0;
+	}
+	
+	// Nurse mortality
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	if (size(nurses) > 0) {
+		dies = runif(size(nurses)) < NURSE_MORT;
+		nurses[dies].fitnessScaling = 0.0;
+	}
+	
+	// Ephemerals die at age >= 1 (they were budded last tick)
+	ephemerals = p1.individuals[(p1.individuals.tag == 2) | (p1.individuals.tag == 3)];
+	oldEphem = ephemerals[ephemerals.age >= 1];
+	if (size(oldEphem) > 0)
+		oldEphem.fitnessScaling = 0.0;
+	
+	// Cap nurses at K_NURSES (keep the youngest if we're over)
+	livingNurses = p1.individuals[(p1.individuals.tag == 1) &
+	                                (p1.individuals.fitnessScaling > 0.0)];
+	if (size(livingNurses) > K_NURSES) {
+		excess = size(livingNurses) - K_NURSES;
+		ages = livingNurses.age;
+		ord = order(ages, ascending=F);
+		toKill = livingNurses[ord[seqLen(excess)]];
+		toKill.fitnessScaling = 0.0;
+	}
+}
+
+
+// =============================================================================
+// PROGRESS LOG (every 5000 ticks)
+// Cheap, just so the SLURM .out file shows the run is alive.
+// =============================================================================
+1: late() {
+	if (sim.cycle % 5000 == 0) {
+		nN = sum(p1.individuals.tag == 1);
+		catn("tick " + sim.cycle + "  nurses=" + nN +
+		      "  total=" + p1.individualCount);
+	}
+}
+
+
+// =============================================================================
+// TERMINAL BLOCK: sample one nurse and write its haplotype to disk
+//
+// This is the explicit terminal late() event. SLiM resolves BURNIN at
+// script-parse time from the -d command line, so the block is scheduled
+// to run on tick BURNIN. After this block finishes the simulation ends
+// because there are no further scheduled events.
+//
+// Output filename: bank_line_TASK_ID.txt in OUT_DIR. The SLURM array
+// produces N of these and a downstream cat collects them into the
+// final bank file.
+// =============================================================================
+BURNIN late() {
+	nurses = p1.individuals[p1.individuals.tag == 1];
+	if (size(nurses) == 0) {
+		catn("ERROR task " + TASK_ID + ": no nurses at tick " + sim.cycle);
+		sim.simulationFinished();
+		return;
+	}
+	
+	// Sample one nurse uniformly
+	chosen = sample(nurses, 1);
+	hap = chosen.haplosomesNonNull[0];
+	muts = hap.mutations;
+	
+	// Build the position string. Sort positions ascending so identical
+	// haplotypes from different runs collapse to the same string in
+	// downstream uniqueness counts.
+	if (size(muts) == 0) {
+		posStr = "";
+	} else {
+		positions = sort(muts.position);
+		posStr = paste(positions, sep=",");
+	}
+	
+	// Per-task output line:
+	//   task_id <TAB> n_mutations <TAB> position_string
+	line = TASK_ID + "\t" + size(muts) + "\t" + posStr;
+	
+	outPath = OUT_DIR + "/bank_line_" + TASK_ID + ".txt";
+	if (!writeFile(outPath, line))
+		catn("ERROR task " + TASK_ID + ": failed to write " + outPath);
+	else
+		catn("task " + TASK_ID + " wrote " + size(muts) +
+		      " mutations to " + outPath);
+	
+	sim.simulationFinished();
+}
