@@ -11,11 +11,9 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=eeg37520@uga.edu
 
-# =============================================================================
 # MU CALIBRATION ARRAY JOB — 18 parameter combinations
 # Each array task reads one line from the parameter file and runs
 # the universal calibration SLiM script with those parameters.
-# =============================================================================
 
 cd /scratch/eeg37520/doliolid_slim
 

@@ -1,6 +1,4 @@
-// =============================================================================
 // MU CALIBRATION — PURIFYING SELECTION, PER-GENE RESOLUTION
-// =============================================================================
 //
 // Same life cycle as neutral calibration, but the genome is partitioned
 // into 13 coding genes (with gene-specific neutral/deleterious ratios
@@ -19,8 +17,6 @@
 //        20260324_pursel_calibration.slim
 //
 // Emily Gipson, UGA mfflab
-// Created: 2026-03-24
-// =============================================================================
 
 initialize() {
 	initializeSLiMModelType("nonWF");
@@ -136,10 +132,7 @@ initialize() {
 	catn("========================================");
 }
 
-
-// =============================================================================
 // REPRODUCTION (identical to neutral version)
-// =============================================================================
 reproduction() {
 	if (individual.tag == 1) {
 		for (i in seqLen(PHOROS_PER_NURSE)) {
@@ -166,10 +159,7 @@ reproduction() {
 	}
 }
 
-
-// =============================================================================
 // FIRST TICK
-// =============================================================================
 1 early() {
 	sim.addSubpop("p1", asInteger(K_NURSES / 10));
 	p1.individuals.tag = 1;
@@ -183,10 +173,7 @@ reproduction() {
 	log.addCustomColumn("pursel_id", "PURSEL_ID;");
 }
 
-
-// =============================================================================
 // EARLY() — stage transitions and mortality
-// =============================================================================
 early() {
 	if (community.tick == 1) return;
 
@@ -229,10 +216,7 @@ early() {
 	if (size(oldGonos) > 0) oldGonos.fitnessScaling = 0.0;
 }
 
-
-// =============================================================================
 // HELPER: subsampled pi (neutral mutations only)
-// =============================================================================
 function (float)calcNucDivSub(void) {
 	if (p1.individualCount < 2) return 0.0;
 	haps = p1.individuals.haplosomesNonNull;
@@ -246,10 +230,7 @@ function (float)calcNucDivSub(void) {
 	return calcPi(haps);
 }
 
-
-// =============================================================================
 // PROGRESS MONITOR
-// =============================================================================
 1: late() {
 	if (community.tick % 1000 != 0) return;
 	if (community.tick > END_TICK) return;
@@ -268,10 +249,7 @@ function (float)calcNucDivSub(void) {
 		" [pursel " + PURSEL_ID + "]");
 }
 
-
-// =============================================================================
 // FINAL REPORT
-// =============================================================================
 END_TICK late() {
 	nurses = p1.individuals[p1.individuals.tag == 1];
 	pi = calcNucDivSub();

@@ -1,6 +1,4 @@
-// =============================================================================
 // DOLIOLID BLOOM FOUNDER THRESHOLD — UNIVERSAL PARAMETERIZED
-// =============================================================================
 //
 // STRATEGY:
 // Run the doliolid life cycle model to mutation-drift equilibrium, then
@@ -21,8 +19,6 @@
 //        20260324_bloom_sweep_universal.slim
 //
 // Emily Gipson, UGA mfflab
-// Created: 2026-03-24
-// =============================================================================
 
 initialize() {
 	initializeSLiMModelType("nonWF");
@@ -101,10 +97,7 @@ initialize() {
 	catn("============================");
 }
 
-
-// =============================================================================
 // REPRODUCTION
-// =============================================================================
 reproduction() {
 	if (individual.tag == 1) {
 		for (i in seqLen(PHOROS_PER_NURSE)) {
@@ -131,10 +124,7 @@ reproduction() {
 	}
 }
 
-
-// =============================================================================
 // FIRST TICK
-// =============================================================================
 1 early() {
 	sim.addSubpop("p1", asInteger(K_NURSES / 10));
 	p1.individuals.tag = 1;
@@ -150,10 +140,7 @@ reproduction() {
 	log.addCustomColumn("bank_size", "size(HAP_BANK);");
 }
 
-
-// =============================================================================
 // EARLY() — parameterized stage transitions and mortality
-// =============================================================================
 early() {
 	if (community.tick == 1) return;
 
@@ -199,10 +186,7 @@ early() {
 	if (size(oldGonos) > 0) oldGonos.fitnessScaling = 0.0;
 }
 
-
-// =============================================================================
 // HELPER FUNCTIONS
-// =============================================================================
 function (float)calcNucDivSub(void) {
 	if (p1.individualCount < 2) return 0.0;
 	haps = p1.individuals.haplosomesNonNull;
@@ -459,10 +443,7 @@ function (void)writeBloomStatsFromBank(integer$ k, integer$ rep, integer$ n,
 	writeFile(outfile, line, append=T);
 }
 
-
-// =============================================================================
 // PROGRESS MONITOR
-// =============================================================================
 1: late() {
 	if (community.tick % 500 != 0) return;
 	if (community.tick > END_TICK) return;
@@ -475,10 +456,7 @@ function (void)writeBloomStatsFromBank(integer$ k, integer$ rep, integer$ n,
 		" [combo " + COMBO_ID + "]");
 }
 
-
-// =============================================================================
 // HAPLOTYPE COLLECTION
-// =============================================================================
 1: late() {
 	if (community.tick <= BURNIN) return;
 	if (community.tick > END_TICK) return;
@@ -497,10 +475,7 @@ function (void)writeBloomStatsFromBank(integer$ k, integer$ rep, integer$ n,
 		N_COLLECTS + ", bank=" + size(HAP_BANK) + ")");
 }
 
-
-// =============================================================================
 // BLOOM SAMPLING SWEEP — runs at END_TICK
-// =============================================================================
 END_TICK late() {
 
 	bankSize = size(HAP_BANK);

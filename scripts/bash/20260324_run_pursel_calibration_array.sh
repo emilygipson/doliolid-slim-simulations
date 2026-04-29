@@ -11,14 +11,10 @@
 #SBATCH --output=/scratch/eeg37520/doliolid_slim/logs/20260324_pursel_cal_%a.out
 #SBATCH --error=/scratch/eeg37520/doliolid_slim/logs/20260324_pursel_cal_%a.err
 
-# =============================================================================
 # PURIFYING SELECTION CALIBRATION — 11 DFE parameter combinations
-# =============================================================================
 # All at combo 4 life cycle: K=5000, OOZ_SURVIVAL=0.50, NURSE_MORT=0.05
 #
 # Emily Gipson, UGA mfflab
-# Created: 2026-03-24
-# =============================================================================
 
 cd /scratch/eeg37520/doliolid_slim
 

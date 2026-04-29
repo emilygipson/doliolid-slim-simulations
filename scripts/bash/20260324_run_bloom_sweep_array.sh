@@ -11,15 +11,11 @@
 #SBATCH --output=/scratch/eeg37520/doliolid_slim/logs/20260324_bloom_sweep_%a.out
 #SBATCH --error=/scratch/eeg37520/doliolid_slim/logs/20260324_bloom_sweep_%a.err
 
-# =============================================================================
 # PRODUCTION BLOOM FOUNDER SWEEP — 18 parameter combinations
-# =============================================================================
 # Reads CALIBRATED mu values from the sweep parameter file.
 # DO NOT submit until calibration is complete and mu values are confirmed.
 #
 # Emily Gipson, UGA mfflab
-# Created: 2026-03-24
-# =============================================================================
 
 cd /scratch/eeg37520/doliolid_slim
 

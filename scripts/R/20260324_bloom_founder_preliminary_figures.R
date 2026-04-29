@@ -3,9 +3,7 @@
 # Input: bloom_founder_pooled_prod_results.tsv (in working directory)
 # Output: 4 PNG figures at 300 dpi
 
-# ===========================================================================
 # LOAD DATA
-# ===========================================================================
 
 d <- read.delim("bloom_founder_pooled_prod_results.tsv", header = TRUE)
 
@@ -41,10 +39,7 @@ agg_fun <- function(sub) {
 a12 <- agg_fun(d12)
 a120 <- agg_fun(d120)
 
-
-# ===========================================================================
 # FIGURE 1: Pi ratio (bloom / background) vs k
-# ===========================================================================
 
 png("20260324_pi_ratio_vs_k.png", width = 7, height = 5, units = "in", res = 300)
 par(mar = c(5, 5, 3, 1))
@@ -81,10 +76,7 @@ legend("bottomright",
 dev.off()
 cat("Saved: 20260324_pi_ratio_vs_k.png\n")
 
-
-# ===========================================================================
 # FIGURE 2: Mean Tajima's D vs k
-# ===========================================================================
 
 png("20260324_tajD_vs_k.png", width = 7, height = 5, units = "in", res = 300)
 par(mar = c(5, 5, 3, 1))
@@ -123,10 +115,7 @@ legend("topright",
 dev.off()
 cat("Saved: 20260324_tajD_vs_k.png\n")
 
-
-# ===========================================================================
 # FIGURE 3: Mean number of unique haplotypes vs k
-# ===========================================================================
 
 png("20260324_n_unique_vs_k.png", width = 7, height = 5, units = "in", res = 300)
 par(mar = c(5, 5, 3, 1))
@@ -157,10 +146,7 @@ legend("right",
 dev.off()
 cat("Saved: 20260324_n_unique_vs_k.png\n")
 
-
-# ===========================================================================
 # FIGURE 4: P(all unique) vs k with birthday problem overlay
-# ===========================================================================
 
 # Analytical birthday problem: P(all unique) for n draws from pool of k
 # P = prod_{i=0}^{n-1} (k-i)/k = prod_{i=0}^{n-1} (1 - i/k)
