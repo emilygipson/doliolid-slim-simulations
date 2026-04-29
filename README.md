@@ -14,13 +14,13 @@ Forward-time population genetic simulations modeling bloom founder dynamics in *
 
 ## Repository structure
 
-\`\`\`
+```
 doliolid-slim-simulations/
 └── scripts/
     ├── slim/       # SLiM simulation scripts
     ├── bash/       # SLURM job submission wrappers
     └── R/          # Calibration checking, post-processing, visualization
-\`\`\`
+```
 
 ## Software
 
